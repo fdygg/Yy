@@ -16,8 +16,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DATABASE = 'store.db'
-CURRENT_TIME = datetime.datetime(2025, 2, 27, 5, 46, 37)  # UTC time
-CURRENT_USER = 'fdygg'
 
 class AdminCommands(commands.Cog):
     def __init__(self, bot):
