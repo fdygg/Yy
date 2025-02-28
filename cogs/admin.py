@@ -2,20 +2,30 @@ import discord
 from discord.ext import commands
 import logging
 from datetime import datetime
-from typing import Optional, List
-from decimal import Decimal
+import json
+from asyncio import TimeoutError
 
 from database import get_connection
-from ext.constants import Balance, TransactionError, CURRENCY_RATES  # Perbaikan import
-from ext.balance_manager import BalanceManager  # Perbaikan import
+from ext.constants import Balance, TransactionError, CURRENCY_RATES
+from ext.balance_manager import BalanceManager
 
-class AdminCog(commands.Cog):
+class AdminCog(commands.Cog, name="Admin"):
     def __init__(self, bot):
         self.bot = bot
         self._init_logger()
         self.balance_manager = BalanceManager(bot)
-        logger = logging.getLogger(__name__)
-        logger.info(f"AdminCog initialized at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        print(f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Load admin ID from config.json
+        try:
+            with open('config.json') as f:
+                config = json.load(f)
+                self.admin_id = int(config['admin_id'])
+                self.logger.info(f"Admin ID loaded: {self.admin_id}")
+        except Exception as e:
+            self.logger.error(f"Failed to load admin_id: {e}")
+            raise
 
     def _init_logger(self):
         self.logger = logging.getLogger(__name__)
@@ -25,68 +35,93 @@ class AdminCog(commands.Cog):
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
 
-    async def _check_admin(self, ctx: commands.Context) -> bool:
+    async def _check_admin(self, ctx):
         """Check if user has admin permissions"""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send("❌ You don't have permission to use this command!")
-            return False
-        return True
+        is_admin = ctx.author.id == self.admin_id
+        if not is_admin:
+            await ctx.send("❌ You are not authorized to use admin commands!")
+            self.logger.warning(f"Unauthorized access attempt by {ctx.author} (ID: {ctx.author.id})")
+        else:
+            self.logger.info(f"Admin command used by {ctx.author} (ID: {ctx.author.id})")
+        return is_admin
 
-    @commands.group(name="admin")
-    @commands.has_permissions(administrator=True)
-    async def admin(self, ctx):
-        """Admin commands group"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send("❌ Invalid admin command. Use `!help admin` for available commands.")
+    @commands.command(name="adminhelp")
+    async def admin_help(self, ctx):
+        """Show admin commands"""
+        if not await self._check_admin(ctx):
+            return
+            
+        embed = discord.Embed(
+            title="Admin Commands",
+            description="Available admin commands:",
+            color=discord.Color.blue()
+        )
+        
+        # Products Commands
+        products_commands = [
+            "`!addproduct <code> <name> <price> <description>` - Add a new product",
+            "`!bulkstock [attach stock.txt]",
+            "`!editproduct <code> <field> <value>` - Edit product details",
+            "`!deleteproduct <code>` - Delete a product",
+            "`!stock [code]` - View product stock",
+            "`!stockhistory <code> [limit]` - View stock history"
+        ]
+        embed.add_field(
+            name="Products",
+            value="\n".join(products_commands),
+            inline=False
+        )
+        
+        # Balance Commands
+        balance_commands = [
+            "`!addbalance <growid> <amount> <currency>` - Add balance to user",
+            "`!removebalance <growid> <amount> <currency>` - Remove balance from user",
+            "`!checkbalance <growid>` - Check user balance",
+            "`!resetuser <growid>` - Reset user balance"
+        ]
+        embed.add_field(
+            name="Balance Management",
+            value="\n".join(balance_commands),
+            inline=False
+        )
+        
+        await ctx.send(embed=embed)
 
-    @admin.command(name="addproduct")
-    async def add_product(
-        self, 
-        ctx, 
-        code: str, 
-        name: str, 
-        price: int, 
-        *, 
-        description: str = "No description"
-    ):
+    @commands.command(name="addproduct")
+    async def add_product(self, ctx, code: str, name: str, price: int, *, description: str = "No description"):
         """Add a new product"""
+        if not await self._check_admin(ctx):
+            return
+            
         try:
-            if not await self._check_admin(ctx):
-                return
-
             conn = get_connection()
             cursor = conn.cursor()
 
             # Check if product exists
-            cursor.execute(
-                "SELECT code FROM products WHERE code = ?", 
-                (code,)
-            )
+            cursor.execute("SELECT code FROM products WHERE code = ?", (code,))
             if cursor.fetchone():
                 await ctx.send(f"❌ Product with code {code} already exists!")
                 return
 
             # Add product
             cursor.execute("""
-                INSERT INTO products (
-                    code, name, price, description, stock, active
-                ) VALUES (?, ?, ?, ?, 0, 1)
+                INSERT INTO products (code, name, price, description, stock)
+                VALUES (?, ?, ?, ?, 0)
             """, (code, name, price, description))
 
             conn.commit()
 
             embed = discord.Embed(
                 title="✅ Product Added",
-                color=discord.Color.green(),
-                timestamp=datetime.utcnow()
+                color=discord.Color.green()
             )
             embed.add_field(name="Code", value=code, inline=True)
             embed.add_field(name="Name", value=name, inline=True)
             embed.add_field(name="Price", value=f"{price:,} WLs", inline=True)
             embed.add_field(name="Description", value=description, inline=False)
-            embed.set_footer(text=f"Added by {ctx.author}")
 
             await ctx.send(embed=embed)
+            self.logger.info(f"Product {code} added by {ctx.author}")
 
         except Exception as e:
             self.logger.error(f"Error adding product: {e}")
@@ -94,22 +129,22 @@ class AdminCog(commands.Cog):
         finally:
             if conn:
                 conn.close()
-                
-    @admin.command(name="editproduct")
-    async def edit_product(
-        self, 
-        ctx, 
-        code: str, 
-        field: str, 
-        *, 
-        value: str
-    ):
-        """Edit a product's details"""
+
+    @commands.command(name="editproduct")
+    async def edit_product(self, ctx, code: str, field: str, *, value: str):
+        """
+        Edit a product's details
+        
+        Parameters:
+        - code: Product code to edit
+        - field: Field to edit (name/price/description)
+        - value: New value for the field
+        """
         try:
             if not await self._check_admin(ctx):
                 return
 
-            valid_fields = ['name', 'price', 'description', 'active']
+            valid_fields = ['name', 'price', 'description']
             if field.lower() not in valid_fields:
                 await ctx.send(
                     f"❌ Invalid field. Valid fields: {', '.join(valid_fields)}"
@@ -119,7 +154,6 @@ class AdminCog(commands.Cog):
             conn = get_connection()
             cursor = conn.cursor()
 
-            # Check if product exists
             cursor.execute(
                 "SELECT * FROM products WHERE code = ?", 
                 (code,)
@@ -129,15 +163,12 @@ class AdminCog(commands.Cog):
                 await ctx.send(f"❌ Product {code} not found!")
                 return
 
-            # Update product
             if field.lower() == 'price':
                 try:
                     value = int(value)
                 except ValueError:
                     await ctx.send("❌ Price must be a number!")
                     return
-            elif field.lower() == 'active':
-                value = int(value.lower() in ['true', '1', 'yes'])
 
             cursor.execute(
                 f"UPDATE products SET {field.lower()} = ? WHERE code = ?",
@@ -147,8 +178,7 @@ class AdminCog(commands.Cog):
 
             embed = discord.Embed(
                 title="✅ Product Updated",
-                color=discord.Color.green(),
-                timestamp=datetime.utcnow()
+                color=discord.Color.green()
             )
             embed.add_field(name="Code", value=code, inline=True)
             embed.add_field(name="Field", value=field, inline=True)
@@ -156,6 +186,7 @@ class AdminCog(commands.Cog):
             embed.set_footer(text=f"Updated by {ctx.author}")
 
             await ctx.send(embed=embed)
+            self.logger.info(f"Product {code} updated")
 
         except Exception as e:
             self.logger.error(f"Error editing product: {e}")
@@ -163,10 +194,135 @@ class AdminCog(commands.Cog):
         finally:
             if conn:
                 conn.close()
+        @commands.command(name="bulkstock")
+    async def bulk_add_stock(self, ctx):
+        """
+        Add stock from attached .txt file
+        File name can be anything (example: stock.txt, items.txt, accounts.txt, etc)
+        Each new line will be counted as 1 stock
+        """
+        try:
+            if not await self._check_admin(ctx):
+                return
 
-    @admin.command(name="deleteproduct")
+            if not ctx.message.attachments:
+                embed = discord.Embed(
+                    title="❌ Missing File",
+                    description="Please attach a .txt file\n\n"
+                              "Example usage:\n"
+                              "1. Type `!bulkstock`\n"
+                              "2. Attach any .txt file (stock.txt, items.txt, etc)\n"
+                              "3. Send the message",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=embed)
+                return
+
+            attachment = ctx.message.attachments[0]
+            if not attachment.filename.lower().endswith('.txt'):
+                embed = discord.Embed(
+                    title="❌ Invalid File Format",
+                    description="Only .txt files are allowed\n\n"
+                              f"Your file: `{attachment.filename}`\n"
+                              "Rename your file to end with .txt",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=embed)
+                return
+
+            # Download and read file content
+            content = await attachment.read()
+            try:
+                file_content = content.decode('utf-8').strip().split('\n')
+            except UnicodeDecodeError:
+                await ctx.send("❌ File must be in text format!")
+                return
+
+            if not file_content or not any(line.strip() for line in file_content):
+                await ctx.send("❌ File is empty!")
+                return
+
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            success_count = 0
+            failed_items = []
+            duplicate_count = 0
+
+            # Get current timestamp
+            current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+            # Process each line
+            for line_number, line in enumerate(file_content, 1):
+                try:
+                    # Skip empty lines
+                    if not line.strip():
+                        continue
+
+                    # Try to insert, catch duplicates
+                    try:
+                        cursor.execute("""
+                            INSERT INTO stock (content, status, added_date, added_by, line_number)
+                            VALUES (?, 'available', ?, ?, ?)
+                        """, (line.strip(), current_time, str(ctx.author), line_number))
+                        success_count += 1
+                    except sqlite3.IntegrityError:
+                        duplicate_count += 1
+                        failed_items.append(f"Line {line_number}: Duplicate entry")
+                    except Exception as e:
+                        failed_items.append(f"Line {line_number}: {str(e)}")
+
+                except Exception as e:
+                    failed_items.append(f"Line {line_number}: {str(e)}")
+
+            conn.commit()
+
+            # Create response embed
+            embed = discord.Embed(
+                title="📦 Stock Update Results",
+                description=f"File: `{attachment.filename}`",
+                color=discord.Color.blue(),
+                timestamp=datetime.utcnow()
+            )
+            
+            embed.add_field(
+                name="Summary",
+                value=f"✅ Successfully added: {success_count}\n"
+                      f"⚠️ Duplicates found: {duplicate_count}\n"
+                      f"❌ Failed entries: {len(failed_items)}",
+                inline=False
+            )
+
+            if failed_items:
+                # Split failed items into chunks if too long
+                chunks = [failed_items[i:i + 10] for i in range(0, len(failed_items), 10)]
+                for i, chunk in enumerate(chunks):
+                    embed.add_field(
+                        name=f"Failed Items (Part {i+1})",
+                        value="\n".join(chunk),
+                        inline=False
+                    )
+
+            embed.set_footer(text=f"Processed by {ctx.author} • {current_time}")
+            await ctx.send(embed=embed)
+            
+            self.logger.info(f"Stock update completed for {attachment.filename}: {success_count} successful, {duplicate_count} duplicates, {len(failed_items)} failed")
+
+        except Exception as e:
+            self.logger.error(f"Error in stock update: {e}")
+            await ctx.send(f"❌ Error: {str(e)}")
+        finally:
+            if conn:
+                conn.close()
+
+    @commands.command(name="deleteproduct")
     async def delete_product(self, ctx, code: str):
-        """Delete a product"""
+        """
+        Delete a product from the shop
+        
+        Parameters:
+        - code: Product code to delete
+        """
         try:
             if not await self._check_admin(ctx):
                 return
@@ -174,7 +330,6 @@ class AdminCog(commands.Cog):
             conn = get_connection()
             cursor = conn.cursor()
 
-            # Check if product exists
             cursor.execute(
                 "SELECT name FROM products WHERE code = ?", 
                 (code,)
@@ -184,7 +339,6 @@ class AdminCog(commands.Cog):
                 await ctx.send(f"❌ Product {code} not found!")
                 return
 
-            # Check for confirmation
             confirm_msg = await ctx.send(
                 f"⚠️ Are you sure you want to delete {code} ({product[0]})?\n"
                 f"This action cannot be undone!"
@@ -209,7 +363,6 @@ class AdminCog(commands.Cog):
                 await ctx.send("❌ Operation cancelled!")
                 return
 
-            # Delete product
             cursor.execute(
                 "DELETE FROM products WHERE code = ?", 
                 (code,)
@@ -219,12 +372,12 @@ class AdminCog(commands.Cog):
             embed = discord.Embed(
                 title="✅ Product Deleted",
                 description=f"Product {code} ({product[0]}) has been deleted.",
-                color=discord.Color.red(),
-                timestamp=datetime.utcnow()
+                color=discord.Color.red()
             )
             embed.set_footer(text=f"Deleted by {ctx.author}")
 
             await ctx.send(embed=embed)
+            self.logger.info(f"Product {code} deleted")
 
         except Exception as e:
             self.logger.error(f"Error deleting product: {e}")
@@ -233,15 +386,16 @@ class AdminCog(commands.Cog):
             if conn:
                 conn.close()
 
-    @admin.command(name="addbalance")
-    async def add_balance(
-        self, 
-        ctx, 
-        growid: str, 
-        amount: int, 
-        currency: str
-    ):
-        """Add balance to a user"""
+    @commands.command(name="addbalance")
+    async def add_balance(self, ctx, growid: str, amount: int, currency: str):
+        """
+        Add balance to a user's account
+        
+        Parameters:
+        - growid: User's Growtopia ID
+        - amount: Amount to add
+        - currency: Currency type (WL/DL/BGL)
+        """
         try:
             if not await self._check_admin(ctx):
                 return
@@ -263,8 +417,7 @@ class AdminCog(commands.Cog):
 
             embed = discord.Embed(
                 title="✅ Balance Added",
-                color=discord.Color.green(),
-                timestamp=datetime.utcnow()
+                color=discord.Color.green()
             )
             embed.add_field(name="GrowID", value=growid, inline=True)
             embed.add_field(
@@ -280,6 +433,7 @@ class AdminCog(commands.Cog):
             embed.set_footer(text=f"Added by {ctx.author}")
 
             await ctx.send(embed=embed)
+            self.logger.info(f"Balance added for user {growid}")
 
         except TransactionError as e:
             await ctx.send(f"❌ {str(e)}")
@@ -287,15 +441,16 @@ class AdminCog(commands.Cog):
             self.logger.error(f"Error adding balance: {e}")
             await ctx.send(f"❌ Error: {str(e)}")
 
-    @admin.command(name="removebalance")
-    async def remove_balance(
-        self, 
-        ctx, 
-        growid: str, 
-        amount: int, 
-        currency: str
-    ):
-        """Remove balance from a user"""
+    @commands.command(name="removebalance")
+    async def remove_balance(self, ctx, growid: str, amount: int, currency: str):
+        """
+        Remove balance from a user's account
+        
+        Parameters:
+        - growid: User's Growtopia ID
+        - amount: Amount to remove
+        - currency: Currency type (WL/DL/BGL)
+        """
         try:
             if not await self._check_admin(ctx):
                 return
@@ -317,8 +472,7 @@ class AdminCog(commands.Cog):
 
             embed = discord.Embed(
                 title="✅ Balance Removed",
-                color=discord.Color.red(),
-                timestamp=datetime.utcnow()
+                color=discord.Color.red()
             )
             embed.add_field(name="GrowID", value=growid, inline=True)
             embed.add_field(
@@ -334,6 +488,7 @@ class AdminCog(commands.Cog):
             embed.set_footer(text=f"Removed by {ctx.author}")
 
             await ctx.send(embed=embed)
+            self.logger.info(f"Balance removed from user {growid}")
 
         except TransactionError as e:
             await ctx.send(f"❌ {str(e)}")
@@ -341,314 +496,66 @@ class AdminCog(commands.Cog):
             self.logger.error(f"Error removing balance: {e}")
             await ctx.send(f"❌ Error: {str(e)}")
 
-    @admin.command(name="checkbalance")
+    @commands.command(name="checkbalance")
     async def check_balance(self, ctx, growid: str):
-        """Check a user's balance"""
+        """
+        Check a user's current balance
+        
+        Parameters:
+        - growid: User's Growtopia ID
+        """
         try:
             if not await self._check_admin(ctx):
                 return
 
-            balance = await self.balance_manager.get_user_balance(growid)
-            embed = discord.Embed(
-                title=f"Balance for {growid}",
-                description=balance.format(),
-                color=discord.Color.blue(),
-                timestamp=datetime.utcnow()
-            )
-            await ctx.send(embed=embed)
+            conn = get_connection()
+            cursor = conn.cursor()
 
-        except TransactionError as e:
-            await ctx.send(f"❌ {str(e)}")
+            cursor.execute("""
+                SELECT balance_wl, balance_dl, balance_bgl 
+                FROM users 
+                WHERE growid = ?
+            """, (growid,))
+            
+            result = cursor.fetchone()
+            if not result:
+                await ctx.send(f"❌ User {growid} not found!")
+                return
+
+            balance = Balance(*result)
+            embed = discord.Embed(
+                title=f"Balance Check - {growid}",
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="Balance", 
+                value=balance.format(), 
+                inline=False
+            )
+            embed.set_footer(text=f"Checked by {ctx.author}")
+
+            await ctx.send(embed=embed)
+            self.logger.info(f"Balance checked for user {growid}")
+
         except Exception as e:
             self.logger.error(f"Error checking balance: {e}")
             await ctx.send(f"❌ Error: {str(e)}")
-
-    @admin.command(name="transactions")
-    async def view_transactions(
-        self, 
-        ctx, 
-        growid: str, 
-        limit: int = 10
-    ):
-        """View recent transactions for a user"""
-        try:
-            if not await self._check_admin(ctx):
-                return
-
-            conn = get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                SELECT type, amount, details, timestamp
-                FROM transaction_log
-                WHERE growid = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            """, (growid, limit))
-
-            transactions = cursor.fetchall()
-            if not transactions:
-                await ctx.send(f"❌ No transactions found for {growid}")
-                return
-
-            embed = discord.Embed(
-                title=f"Recent Transactions for {growid}",
-                color=discord.Color.blue(),
-                timestamp=datetime.utcnow()
-            )
-
-            for tx_type, amount, details, timestamp in transactions:
-                embed.add_field(
-                    name=f"{tx_type} - {timestamp}",
-                    value=f"Amount: {amount:,} WLs\nDetails: {details}",
-                    inline=False
-                )
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            self.logger.error(f"Error viewing transactions: {e}")
-            await ctx.send(f"❌ Error: {str(e)}")
         finally:
             if conn:
                 conn.close()
 
-    @admin.command(name="stock")
-    async def view_stock(self, ctx, product_code: str = None):
-        """View product stock"""
-        try:
-            if not await self._check_admin(ctx):
-                return
-
-            conn = get_connection()
-            cursor = conn.cursor()
-
-            if product_code:
-                # View specific product stock
-                cursor.execute("""
-                    SELECT p.name, p.price, p.stock, p.description, p.active
-                    FROM products p
-                    WHERE p.code = ?
-                """, (product_code,))
-                
-                product = cursor.fetchone()
-                if not product:
-                    await ctx.send(f"❌ Product {product_code} not found!")
-                    return
-
-                name, price, stock, desc, active = product
-                
-                embed = discord.Embed(
-                    title=f"Stock Details - {product_code}",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.utcnow()
-                )
-                embed.add_field(name="Name", value=name, inline=True)
-                embed.add_field(name="Price", value=f"{price:,} WLs", inline=True)
-                embed.add_field(name="Stock", value=stock, inline=True)
-                embed.add_field(name="Description", value=desc, inline=False)
-                embed.add_field(name="Status", value="Active" if active else "Inactive", inline=True)
-
-            else:
-                # View all products stock
-                cursor.execute("""
-                    SELECT code, name, price, stock, active
-                    FROM products
-                    ORDER BY price ASC
-                """)
-                
-                products = cursor.fetchall()
-                if not products:
-                    await ctx.send("❌ No products found!")
-                    return
-
-                embed = discord.Embed(
-                    title="Current Stock Status",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.utcnow()
-                )
-
-                for code, name, price, stock, active in products:
-                    status = "🟢" if active else "🔴"
-                    embed.add_field(
-                        name=f"{status} {name} ({code})",
-                        value=f"Price: {price:,} WLs\nStock: {stock}",
-                        inline=True
-                    )
-            # Lanjutan dari view_stock command
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            self.logger.error(f"Error viewing stock: {e}")
-            await ctx.send(f"❌ Error: {str(e)}")
-        finally:
-            if conn:
-                conn.close()
-
-    @admin.command(name="stockhistory")
-    async def view_stock_history(
-        self, 
-        ctx, 
-        product_code: str, 
-        limit: int = 10
-    ):
-        """View stock addition history"""
-        try:
-            if not await self._check_admin(ctx):
-                return
-
-            conn = get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                SELECT ps.content, ps.added_by, ps.added_at, ps.used, 
-                       ps.used_by, ps.used_at, ps.buyer_growid
-                FROM product_stock ps
-                WHERE ps.product_code = ?
-                ORDER BY ps.added_at DESC
-                LIMIT ?
-            """, (product_code, limit))
-
-            items = cursor.fetchall()
-            if not items:
-                await ctx.send(f"❌ No stock history found for {product_code}")
-                return
-
-            embed = discord.Embed(
-                title=f"Stock History - {product_code}",
-                color=discord.Color.blue(),
-                timestamp=datetime.utcnow()
-            )
-
-            for content, added_by, added_at, used, used_by, used_at, buyer in items:
-                status = "🔴 Sold" if used else "🟢 Available"
-                value = (
-                    f"Added by: {added_by}\n"
-                    f"Added at: {added_at}\n"
-                    f"Status: {status}\n"
-                )
-                if used:
-                    value += (
-                        f"Buyer: {buyer}\n"
-                        f"Used by: {used_by}\n"
-                        f"Used at: {used_at}"
-                    )
-
-                embed.add_field(
-                    name=f"Item {content[:20]}...",
-                    value=value,
-                    inline=False
-                )
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            self.logger.error(f"Error viewing stock history: {e}")
-            await ctx.send(f"❌ Error: {str(e)}")
-        finally:
-            if conn:
-                conn.close()
-
-    @admin.command(name="stats")
-    async def view_stats(self, ctx, days: int = 7):
-        """View system statistics"""
-        try:
-            if not await self._check_admin(ctx):
-                return
-
-            conn = get_connection()
-            cursor = conn.cursor()
-
-            # Get transaction stats
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_tx,
-                    SUM(CASE WHEN type = 'PURCHASE' THEN 1 ELSE 0 END) as purchases,
-                    SUM(CASE WHEN type = 'DONATION' THEN 1 ELSE 0 END) as donations,
-                    SUM(amount) as total_amount
-                FROM transaction_log
-                WHERE timestamp >= datetime('now', ?)
-            """, (f'-{days} days',))
-
-            tx_stats = cursor.fetchone()
-
-            # Get product stats
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_products,
-                    SUM(stock) as total_stock,
-                    SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active_products
-                FROM products
-            """)
-
-            prod_stats = cursor.fetchone()
-
-            # Get user stats
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_users,
-                    SUM(balance_wl + balance_dl * 100 + balance_bgl * 10000) as total_balance
-                FROM users
-            """)
-
-            user_stats = cursor.fetchone()
-
-            embed = discord.Embed(
-                title=f"System Statistics (Last {days} days)",
-                color=discord.Color.blue(),
-                timestamp=datetime.utcnow()
-            )
-
-            # Transaction Stats
-            embed.add_field(
-                name="Transaction Statistics",
-                value=(
-                    f"Total Transactions: {tx_stats[0]:,}\n"
-                    f"Purchases: {tx_stats[1]:,}\n"
-                    f"Donations: {tx_stats[2]:,}\n"
-                    f"Total Volume: {tx_stats[3]:,} WLs"
-                ),
-                inline=False
-            )
-
-            # Product Stats
-            embed.add_field(
-                name="Product Statistics",
-                value=(
-                    f"Total Products: {prod_stats[0]:,}\n"
-                    f"Active Products: {prod_stats[2]:,}\n"
-                    f"Total Stock: {prod_stats[1]:,}"
-                ),
-                inline=False
-            )
-
-            # User Stats
-            embed.add_field(
-                name="User Statistics",
-                value=(
-                    f"Total Users: {user_stats[0]:,}\n"
-                    f"Total Balance: {user_stats[1]:,} WLs"
-                ),
-                inline=False
-            )
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            self.logger.error(f"Error viewing stats: {e}")
-            await ctx.send(f"❌ Error: {str(e)}")
-        finally:
-            if conn:
-                conn.close()
-
-    @admin.command(name="resetuser")
+    @commands.command(name="resetuser")
     async def reset_user(self, ctx, growid: str):
-        """Reset a user's balance (Admin only)"""
+        """
+        Reset a user's balance to zero
+        
+        Parameters:
+        - growid: User's Growtopia ID to reset
+        """
         try:
             if not await self._check_admin(ctx):
                 return
 
-            # Request confirmation
             confirm_msg = await ctx.send(
                 f"⚠️ Are you sure you want to reset {growid}'s balance?\n"
                 f"This action cannot be undone!"
@@ -673,52 +580,97 @@ class AdminCog(commands.Cog):
                 await ctx.send("❌ Operation cancelled!")
                 return
 
-            # Reset balance
             conn = get_connection()
             cursor = conn.cursor()
 
-            # Get current balance for logging
-            old_balance = await self.balance_manager.get_user_balance(growid)
+            # Check if user exists
+            cursor.execute(
+                "SELECT growid FROM users WHERE growid = ?", 
+                (growid,)
+            )
+            if not cursor.fetchone():
+                await ctx.send(f"❌ User {growid} not found!")
+                return
 
-            # Reset balance to 0
+            # Reset balance
             cursor.execute("""
                 UPDATE users 
                 SET balance_wl = 0, balance_dl = 0, balance_bgl = 0 
                 WHERE growid = ?
             """, (growid,))
-
-            # Log the reset
+            
+            # Add transaction log
             cursor.execute("""
-                INSERT INTO transaction_log 
-                (growid, amount, type, details, old_balance, new_balance)
-                VALUES (?, ?, 'ADMIN_RESET', ?, ?, ?)
-            """, (
-                growid,
-                -old_balance.total_wls,
-                f"Balance reset by admin {ctx.author}",
-                old_balance.format(),
-                Balance(0, 0, 0).format()
-            ))
+                INSERT INTO transaction_log (
+                    growid, type, amount, details
+                ) VALUES (?, 'RESET', 0, ?)
+            """, (growid, f"Balance reset by admin {ctx.author}"))
 
             conn.commit()
 
             embed = discord.Embed(
                 title="✅ User Reset",
-                description=f"Balance for {growid} has been reset to 0",
-                color=discord.Color.red(),
-                timestamp=datetime.utcnow()
-            )
-            embed.add_field(
-                name="Old Balance",
-                value=old_balance.format(),
-                inline=False
+                description=f"User {growid}'s balance has been reset to 0.",
+                color=discord.Color.red()
             )
             embed.set_footer(text=f"Reset by {ctx.author}")
 
             await ctx.send(embed=embed)
+            self.logger.info(f"Balance reset for user {growid}")
 
         except Exception as e:
             self.logger.error(f"Error resetting user: {e}")
+            await ctx.send(f"❌ Error: {str(e)}")
+        finally:
+            if conn:
+                conn.close()
+
+    @commands.command(name="transactions")
+    async def view_transactions(self, ctx, growid: str, limit: int = 10):
+        """
+        View a user's transaction history
+        
+        Parameters:
+        - growid: User's Growtopia ID
+        - limit: Number of transactions to show (default: 10)
+        """
+        try:
+            if not await self._check_admin(ctx):
+                return
+
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT type, amount, details, timestamp
+                FROM transaction_log
+                WHERE growid = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (growid, limit))
+
+            transactions = cursor.fetchall()
+            if not transactions:
+                await ctx.send(f"❌ No transactions found for {growid}!")
+                return
+
+            embed = discord.Embed(
+                title=f"Transaction History - {growid}",
+                color=discord.Color.blue()
+            )
+
+            for tx_type, amount, details, timestamp in transactions:
+                embed.add_field(
+                    name=f"{tx_type} - {timestamp}",
+                    value=f"Amount: {amount:,} WLs\nDetails: {details}",
+                    inline=False
+                )
+
+            await ctx.send(embed=embed)
+            self.logger.info(f"Transactions viewed for user {growid}")
+
+        except Exception as e:
+            self.logger.error(f"Error viewing transactions: {e}")
             await ctx.send(f"❌ Error: {str(e)}")
         finally:
             if conn:
