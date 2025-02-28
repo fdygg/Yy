@@ -4,6 +4,7 @@ import logging
 from database import get_connection
 from typing import List, Dict, Any
 from datetime import datetime
+import sqlite3
 
 class ProductManager:
     def __init__(self, bot):
