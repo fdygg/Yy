@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 import json
 from asyncio import TimeoutError
-
+import sqlite3
 from database import get_connection
 from ext.constants import Balance, TransactionError, CURRENCY_RATES
 from ext.balance_manager import BalanceManager
@@ -59,7 +59,7 @@ class AdminCog(commands.Cog, name="Admin"):
         
         # Products Commands
         products_commands = [
-            "`!addproduct <code> <name> <price> <description>` - Add a new product",
+            "`!addproduct <code> <n> <price> <description>` - Add a new product",
             "`!bulkstock [attach stock.txt]",
             "`!editproduct <code> <field> <value>` - Edit product details",
             "`!deleteproduct <code>` - Delete a product",
@@ -194,7 +194,8 @@ class AdminCog(commands.Cog, name="Admin"):
         finally:
             if conn:
                 conn.close()
-        @commands.command(name="bulkstock")
+
+    @commands.command(name="bulkstock")
     async def bulk_add_stock(self, ctx):
         """
         Add stock from attached .txt file
