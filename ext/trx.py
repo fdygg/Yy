@@ -21,6 +21,7 @@ class TransactionCog(commands.Cog):
         self.bot = bot
         self._init_logger()
         self._cache = {}
+        print(f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
         
     def _init_logger(self):
         self.logger = logging.getLogger(__name__)
@@ -128,11 +129,11 @@ class TransactionCog(commands.Cog):
                 # Get items with lock
                 cursor.execute("""
                     SELECT id, content 
-                    FROM product_stock 
-                    WHERE product_code = ? AND used = 0 
+                    FROM stock 
+                    WHERE status = 'available'
                     LIMIT ?
                     FOR UPDATE
-                """, (product_code, quantity))
+                """, (quantity,))
                 
                 items = cursor.fetchall()
                 if len(items) < quantity:
@@ -143,12 +144,26 @@ class TransactionCog(commands.Cog):
                     cursor, growid, balance, required_wls, name, product_code
                 )
                 
-                # Update stock
-                await self._update_stock(
-                    cursor, items, product_code, quantity, user, growid
-                )
+                # Update stock status
+                current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                for item_id, _ in items:
+                    cursor.execute("""
+                        UPDATE stock 
+                        SET status = 'used',
+                            used_date = ?,
+                            used_by = ?,
+                            buyer_growid = ?
+                        WHERE id = ?
+                    """, (current_time, str(user.id), growid, item_id))
                 
-                # Send items
+                # Update product stock count
+                cursor.execute("""
+                    UPDATE products 
+                    SET stock = stock - ? 
+                    WHERE code = ?
+                """, (quantity, product_code))
+                
+                # Send items to user
                 await self._send_items_to_user(
                     user, name, quantity, required_wls, new_balance, items
                 )
@@ -229,34 +244,6 @@ class TransactionCog(commands.Cog):
         
         return new_balance
 
-    async def _update_stock(
-        self,
-        cursor,
-        items: List[Tuple],
-        product_code: str,
-        quantity: int,
-        user: discord.User,
-        growid: str
-    ):
-        current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Mark items as used
-        cursor.executemany("""
-            UPDATE product_stock 
-            SET used = 1,
-                used_by = ?,
-                used_at = ?,
-                buyer_growid = ?
-            WHERE id = ?
-        """, [(str(user), current_time, growid, item[0]) for item in items])
-        
-        # Update product stock count
-        cursor.execute("""
-            UPDATE products 
-            SET stock = stock - ? 
-            WHERE code = ?
-        """, (quantity, product_code))
-
     async def _send_items_to_user(
         self,
         user: discord.User,
@@ -300,11 +287,9 @@ class TransactionCog(commands.Cog):
     async def add_stock_from_file(
         self, 
         ctx: commands.Context, 
-        product_code: str, 
         file_path: str = None
     ) -> discord.Embed:
         """Add stock from file"""
-        conn = None
         try:
             current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
             self.logger.info(f"Adding stock at {current_time}")
@@ -328,41 +313,40 @@ class TransactionCog(commands.Cog):
                 raise TransactionError("File is empty!")
 
             async with self._db_transaction() as cursor:
-                # Verify product exists
-                cursor.execute(
-                    "SELECT code FROM products WHERE code = ?", 
-                    (product_code,)
-                )
-                if not cursor.fetchone():
-                    raise TransactionError(
-                        f"Product with code {product_code} does not exist!"
-                    )
-
                 # Add stock items
                 added_count = 0
+                failed_items = []
+                
                 for line in lines:
-                    cursor.execute("""
-                        INSERT INTO product_stock (
-                            product_code, content, added_by, source_file
-                        ) VALUES (?, ?, ?, ?)
-                    """, (product_code, line, str(ctx.author), file_path))
-                    added_count += 1
-
-                # Update product stock count
-                cursor.execute("""
-                    UPDATE products 
-                    SET stock = stock + ? 
-                    WHERE code = ?
-                """, (added_count, product_code))
+                    try:
+                        cursor.execute("""
+                            INSERT INTO stock (
+                                content, status, added_date, added_by, source_file
+                            ) VALUES (?, 'available', ?, ?, ?)
+                        """, (line, current_time, str(ctx.author), file_path))
+                        added_count += 1
+                    except Exception as e:
+                        failed_items.append(f"{line}: {str(e)}")
 
             embed = discord.Embed(
                 title="✅ Stock Added Successfully",
                 color=discord.Color.green(),
                 timestamp=datetime.utcnow()
             )
-            embed.add_field(name="Product Code", value=product_code, inline=True)
             embed.add_field(name="Items Added", value=str(added_count), inline=True)
+            embed.add_field(name="Failed Items", value=str(len(failed_items)), inline=True)
             embed.add_field(name="Source File", value=file_path, inline=True)
+            
+            if failed_items:
+                # Split failed items into chunks if too long
+                chunks = [failed_items[i:i + 10] for i in range(0, len(failed_items), 10)]
+                for i, chunk in enumerate(chunks):
+                    embed.add_field(
+                        name=f"Failed Items (Part {i+1})",
+                        value="\n".join(chunk),
+                        inline=False
+                    )
+                    
             embed.set_footer(text=f"Added by {ctx.author}")
 
             # Clean up file if it was an attachment
