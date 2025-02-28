@@ -1,12 +1,15 @@
 import sqlite3
 import logging
 from datetime import datetime
+import os
 
 logger = logging.getLogger(__name__)
 
+DATABASE_PATH = 'shop.db'
+
 def get_connection():
     """Get SQLite database connection"""
-    return sqlite3.connect('shop.db')
+    return sqlite3.connect(DATABASE_PATH)
 
 def get_balance(growid: str):
     """Get user balance from database"""
@@ -63,19 +66,18 @@ def setup_database():
             )
         """)
 
-        # Create product_stock table
+        # Create stock table
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS product_stock (
+            CREATE TABLE IF NOT EXISTS stock (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                product_code TEXT NOT NULL,
                 content TEXT NOT NULL,
-                used INTEGER DEFAULT 0,
-                used_by TEXT DEFAULT NULL,
-                used_at TIMESTAMP DEFAULT NULL,
+                status TEXT NOT NULL DEFAULT 'available',
+                added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
                 added_by TEXT NOT NULL,
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                source_file TEXT,
-                FOREIGN KEY (product_code) REFERENCES products(code)
+                used_date DATETIME,
+                used_by TEXT,
+                buyer_growid TEXT,
+                source_file TEXT
             )
         """)
 
@@ -120,3 +122,8 @@ def format_datetime(dt=None):
     if dt is None:
         dt = datetime.utcnow()
     return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+def ensure_database():
+    """Ensure database is set up"""
+    if not os.path.exists(DATABASE_PATH):
+        setup_database()
