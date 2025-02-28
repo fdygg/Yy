@@ -40,20 +40,37 @@ except KeyError as e:
     raise
 
 # Setup intents
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.messages = True
+intents = discord.Intents.all()
 
 class MyBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix='!', intents=intents)
+        super().__init__(
+            command_prefix='!',
+            intents=intents,
+            help_command=None
+        )
         self.session = None
-    
+        self.admin_id = ADMIN_ID  # Tambahkan ini
+
     async def setup_hook(self):
         self.session = aiohttp.ClientSession()
-        # Load extensions in setup_hook
-        await load_extensions(self)
+        print(f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Load extensions
+        extensions = [
+            'cogs.admin',
+            'ext.live',
+            'ext.trx',
+            'ext.donate',
+            'ext.product_manager'
+        ]
+        
+        for ext in extensions:
+            try:
+                await self.load_extension(ext)
+                logger.info(f'Loaded extension: {ext}')
+            except Exception as e:
+                logger.error(f'Failed to load {ext}: {e}')
     
     async def close(self):
         if self.session:
@@ -62,23 +79,12 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-def is_admin():
-    """Check if user is admin"""
-    async def predicate(ctx):
-        is_admin = ctx.author.id == ADMIN_ID
-        logger.info(f'Admin check for {ctx.author} (ID: {ctx.author.id}): {is_admin}')
-        return is_admin
-    return commands.check(predicate)
-
 @bot.event
 async def on_ready():
     """Event when bot is ready"""
-    current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f'Bot {bot.user.name} is online!')
     logger.info(f'Guild ID: {GUILD_ID}')
     logger.info(f'Admin ID: {ADMIN_ID}')
-    logger.info(f'Current time (UTC): {current_time}')
-    logger.info(f'Current User: fdygg')
     
     # Set custom status
     await bot.change_presence(
@@ -108,24 +114,6 @@ async def on_command_error(ctx, error):
         logger.error(f'Error in {ctx.command}: {error}')
         await ctx.send(f"❌ An error occurred: {str(error)}")
 
-async def load_extensions(bot):
-    """Load all extensions"""
-    # Define extensions to load
-    extensions = [
-        'ext.live',
-        'ext.trx',
-        'ext.donate',
-        'ext.product_manager',
-        'cogs.admin'
-    ]
-    
-    for ext in extensions:
-        try:
-            await bot.load_extension(ext)
-            logger.info(f'Loaded extension: {ext}')
-        except Exception as e:
-            logger.error(f'Failed to load {ext}: {e}')
-
 async def main():
     """Main function to run the bot"""
     try:
@@ -135,9 +123,6 @@ async def main():
         # Start bot
         async with bot:
             await bot.start(TOKEN)
-    except aiohttp.ClientError as e:
-        logger.error(f'Network error: {e}')
-        raise
     except Exception as e:
         logger.error(f'Fatal error: {e}')
         raise
