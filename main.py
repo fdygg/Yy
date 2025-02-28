@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import asyncio
+import aiohttp
 from database import setup_database, get_connection
 from datetime import datetime
 
@@ -44,7 +45,22 @@ intents.message_content = True
 intents.members = True
 intents.messages = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+class MyBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix='!', intents=intents)
+        self.session = None
+    
+    async def setup_hook(self):
+        self.session = aiohttp.ClientSession()
+        # Load extensions in setup_hook
+        await load_extensions(self)
+    
+    async def close(self):
+        if self.session:
+            await self.session.close()
+        await super().close()
+
+bot = MyBot()
 
 def is_admin():
     """Check if user is admin"""
@@ -57,9 +73,12 @@ def is_admin():
 @bot.event
 async def on_ready():
     """Event when bot is ready"""
+    current_time = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
     logger.info(f'Bot {bot.user.name} is online!')
     logger.info(f'Guild ID: {GUILD_ID}')
     logger.info(f'Admin ID: {ADMIN_ID}')
+    logger.info(f'Current time (UTC): {current_time}')
+    logger.info(f'Current User: fdygg')
     
     # Set custom status
     await bot.change_presence(
@@ -89,17 +108,23 @@ async def on_command_error(ctx, error):
         logger.error(f'Error in {ctx.command}: {error}')
         await ctx.send(f"❌ An error occurred: {str(error)}")
 
-async def load_extensions():
+async def load_extensions(bot):
     """Load all extensions"""
-    # Load from ext folder
-    if os.path.exists('./ext'):
-        for filename in os.listdir('./ext'):
-            if filename.endswith('.py'):
-                try:
-                    await bot.load_extension(f'ext.{filename[:-3]}')
-                    logger.info(f'Loaded ext: {filename}')
-                except Exception as e:
-                    logger.error(f'Failed to load {filename}: {e}')
+    # Define extensions to load
+    extensions = [
+        'ext.live',
+        'ext.trx',
+        'ext.donate',
+        'ext.product_manager',
+        'cogs.admin'
+    ]
+    
+    for ext in extensions:
+        try:
+            await bot.load_extension(ext)
+            logger.info(f'Loaded extension: {ext}')
+        except Exception as e:
+            logger.error(f'Failed to load {ext}: {e}')
 
 async def main():
     """Main function to run the bot"""
@@ -107,14 +132,18 @@ async def main():
         # Initialize database
         setup_database()
         
-        # Load extensions
-        await load_extensions()
-        
         # Start bot
-        await bot.start(TOKEN)
+        async with bot:
+            await bot.start(TOKEN)
+    except aiohttp.ClientError as e:
+        logger.error(f'Network error: {e}')
+        raise
     except Exception as e:
         logger.error(f'Fatal error: {e}')
         raise
+    finally:
+        if not bot.is_closed():
+            await bot.close()
 
 if __name__ == '__main__':
     try:
