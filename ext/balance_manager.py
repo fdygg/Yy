@@ -1,208 +1,106 @@
 import discord
 from discord.ext import commands
 import logging
-import datetime
 from database import get_connection
+from datetime import datetime
+from .constants import Balance, TransactionError, CURRENCY_RATES
 
 class BalanceManager(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-    def db_connect(self):
-        return get_connection()
-
-    async def get_user_balance(self, growid: str):
-        """Get user balance from database"""
+        self._init_logger()
+        
+    def _init_logger(self):
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+        
+    async def get_user_balance(self, growid: str) -> Balance:
+        """Get user's balance from database"""
+        conn = None
         try:
-            conn = self.db_connect()
+            conn = get_connection()
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT balance_wl, balance_dl, balance_bgl 
-                FROM users 
-                WHERE growid = ?
-            """, (growid,))
-            balance = cursor.fetchone()
-            conn.close()
-            return balance if balance else (0, 0, 0)
+            cursor.execute(
+                "SELECT balance_wl, balance_dl, balance_bgl FROM users WHERE growid = ?",
+                (growid,)
+            )
+            result = cursor.fetchone()
+            if result:
+                return Balance(*result)
+            return Balance(0, 0, 0)
+            
         except Exception as e:
-            logging.error(f"Error getting balance: {e}")
-            return None
+            self.logger.error(f"Error getting balance: {e}")
+            raise TransactionError(f"Failed to get balance: {str(e)}")
+            
+        finally:
+            if conn:
+                conn.close()
 
-    async def add_balance(self, growid: str, wl: int = 0, dl: int = 0, bgl: int = 0):
-        """Add balance to user account"""
+    async def update_balance(
+        self, 
+        growid: str, 
+        wl: int = 0, 
+        dl: int = 0, 
+        bgl: int = 0,
+        transaction_type: str = "MANUAL",
+        details: str = ""
+    ) -> Balance:
+        """Update user's balance and log transaction"""
+        conn = None
         try:
-            conn = self.db_connect()
+            conn = get_connection()
             cursor = conn.cursor()
             
             # Get current balance
-            cursor.execute("""
-                SELECT balance_wl, balance_dl, balance_bgl 
-                FROM users 
-                WHERE growid = ?
-            """, (growid,))
-            current = cursor.fetchone()
+            current = await self.get_user_balance(growid)
             
-            current_time = datetime.datetime.utcnow()
+            # Calculate new balance
+            new_balance = Balance(
+                current.wl + wl,
+                current.dl + dl,
+                current.bgl + bgl
+            )
             
-            if current:
-                new_wl = current[0] + wl
-                new_dl = current[1] + dl
-                new_bgl = current[2] + bgl
+            # Validate balance isn't negative
+            if new_balance.total_wls < 0:
+                raise TransactionError("Balance cannot be negative")
                 
-                cursor.execute("""
-                    UPDATE users 
-                    SET balance_wl = ?, 
-                        balance_dl = ?, 
-                        balance_bgl = ?,
-                        updated_at = ? 
-                    WHERE growid = ?
-                """, (new_wl, new_dl, new_bgl, current_time, growid))
-            else:
-                cursor.execute("""
-                    INSERT INTO users (
-                        growid, balance_wl, balance_dl, balance_bgl, 
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                """, (growid, wl, dl, bgl, current_time, current_time))
-
-            # Add transaction log
-            cursor.execute("""
-                INSERT INTO balance_transactions (
-                    growid, type, amount_wl, amount_dl, amount_bgl, 
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            """, (growid, 'ADD', wl, dl, bgl, current_time))
-            
-            conn.commit()
-            conn.close()
-            
-            return True
-        except Exception as e:
-            logging.error(f"Error adding balance: {e}")
-            return False
-
-    async def remove_balance(self, growid: str, wl: int = 0, dl: int = 0, bgl: int = 0):
-        """Remove balance from user account"""
-        try:
-            conn = self.db_connect()
-            cursor = conn.cursor()
-            
-            # Get current balance
-            cursor.execute("""
-                SELECT balance_wl, balance_dl, balance_bgl 
-                FROM users 
-                WHERE growid = ?
-            """, (growid,))
-            current = cursor.fetchone()
-            
-            if not current:
-                return False
-                
-            new_wl = current[0] - wl
-            new_dl = current[1] - dl
-            new_bgl = current[2] - bgl
-            
-            # Check if balance would go negative
-            if new_wl < 0 or new_dl < 0 or new_bgl < 0:
-                return False
-            
-            current_time = datetime.datetime.utcnow()
-            
+            # Update balance
             cursor.execute("""
                 UPDATE users 
                 SET balance_wl = ?, 
                     balance_dl = ?, 
-                    balance_bgl = ?,
-                    updated_at = ? 
+                    balance_bgl = ? 
                 WHERE growid = ?
-            """, (new_wl, new_dl, new_bgl, current_time, growid))
+            """, (new_balance.wl, new_balance.dl, new_balance.bgl, growid))
             
-            # Add transaction log
+            # Log transaction
             cursor.execute("""
-                INSERT INTO balance_transactions (
-                    growid, type, amount_wl, amount_dl, amount_bgl, 
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            """, (growid, 'REMOVE', wl, dl, bgl, current_time))
+                INSERT INTO transaction_log 
+                (growid, amount, type, details, old_balance, new_balance, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            """, (
+                growid,
+                wl + (dl * CURRENCY_RATES['DL']) + (bgl * CURRENCY_RATES['BGL']),
+                transaction_type,
+                details,
+                current.format(),
+                new_balance.format()
+            ))
             
             conn.commit()
-            conn.close()
+            return new_balance
             
-            return True
         except Exception as e:
-            logging.error(f"Error removing balance: {e}")
-            return False
-
-    async def transfer_balance(self, from_growid: str, to_growid: str, wl: int = 0, dl: int = 0, bgl: int = 0):
-        """Transfer balance between users"""
-        try:
-            # Remove from sender
-            if not await self.remove_balance(from_growid, wl, dl, bgl):
-                return False
-                
-            # Add to receiver
-            if not await self.add_balance(to_growid, wl, dl, bgl):
-                # Rollback if adding fails
-                await self.add_balance(from_growid, wl, dl, bgl)
-                return False
-                
-            return True
-        except Exception as e:
-            logging.error(f"Error transferring balance: {e}")
-            return False
-
-    def add_balance_sync(self, growid: str, wl: int = 0, dl: int = 0, bgl: int = 0):
-        """Synchronous version of add_balance for use in other cogs"""
-        try:
-            conn = self.db_connect()
-            cursor = conn.cursor()
+            if conn:
+                conn.rollback()
+            self.logger.error(f"Error updating balance: {e}")
+            raise TransactionError(f"Failed to update balance: {str(e)}")
             
-            # Get current balance
-            cursor.execute("""
-                SELECT balance_wl, balance_dl, balance_bgl 
-                FROM users 
-                WHERE growid = ?
-            """, (growid,))
-            current = cursor.fetchone()
-            
-            current_time = datetime.datetime.utcnow()
-            
-            if current:
-                new_wl = current[0] + wl
-                new_dl = current[1] + dl
-                new_bgl = current[2] + bgl
-                
-                cursor.execute("""
-                    UPDATE users 
-                    SET balance_wl = ?, 
-                        balance_dl = ?, 
-                        balance_bgl = ?,
-                        updated_at = ? 
-                    WHERE growid = ?
-                """, (new_wl, new_dl, new_bgl, current_time, growid))
-            else:
-                cursor.execute("""
-                    INSERT INTO users (
-                        growid, balance_wl, balance_dl, balance_bgl, 
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                """, (growid, wl, dl, bgl, current_time, current_time))
-
-            # Add transaction log
-            cursor.execute("""
-                INSERT INTO balance_transactions (
-                    growid, type, amount_wl, amount_dl, amount_bgl, 
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            """, (growid, 'ADD', wl, dl, bgl, current_time))
-            
-            conn.commit()
-            conn.close()
-            
-            return True
-        except Exception as e:
-            logging.error(f"Error adding balance: {e}")
-            return False
+        finally:
+            if conn:
+                conn.close()
 
 async def setup(bot):
     await bot.add_cog(BalanceManager(bot))
