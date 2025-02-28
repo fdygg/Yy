@@ -15,16 +15,15 @@ class ProductManager:
         self.logger.setLevel(logging.INFO)
 
     async def get_all_products(self) -> List[Dict[str, Any]]:
-        """Get all active products from database"""
+        """Get all products from database"""
         conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
             cursor.execute("""
-                SELECT code, name, price, stock, description, active
+                SELECT code, name, price, stock, description
                 FROM products
-                WHERE active = 1
                 ORDER BY price ASC
             """)
             
@@ -35,8 +34,7 @@ class ProductManager:
                     'name': row[1],
                     'price': row[2],
                     'stock': row[3],
-                    'description': row[4],
-                    'active': row[5]
+                    'description': row[4]
                 })
             
             return products
@@ -57,7 +55,7 @@ class ProductManager:
             cursor = conn.cursor()
             
             cursor.execute("""
-                SELECT code, name, price, stock, description, active
+                SELECT code, name, price, stock, description
                 FROM products
                 WHERE code = ?
             """, (code,))
@@ -69,8 +67,7 @@ class ProductManager:
                     'name': row[1],
                     'price': row[2],
                     'stock': row[3],
-                    'description': row[4],
-                    'active': row[5]
+                    'description': row[4]
                 }
             return None
             
@@ -96,6 +93,7 @@ class ProductManager:
             """, (quantity, code))
             
             conn.commit()
+            self.logger.info(f"Stock updated for {code}")
             return True
             
         except Exception as e:
@@ -123,11 +121,12 @@ class ProductManager:
             
             cursor.execute("""
                 INSERT INTO products (
-                    code, name, price, description, stock, active
-                ) VALUES (?, ?, ?, ?, 0, 1)
+                    code, name, price, description, stock
+                ) VALUES (?, ?, ?, ?, 0)
             """, (code, name, price, description))
             
             conn.commit()
+            self.logger.info(f"Product {code} created")
             return True
             
         except Exception as e:
@@ -146,7 +145,7 @@ class ProductManager:
         **kwargs
     ) -> bool:
         """Update product details"""
-        valid_fields = ['name', 'price', 'description', 'active']
+        valid_fields = ['name', 'price', 'description']
         update_fields = []
         values = []
         
@@ -167,6 +166,7 @@ class ProductManager:
             cursor = conn.cursor()
             cursor.execute(query, values)
             conn.commit()
+            self.logger.info(f"Product {code} updated")
             return True
             
         except Exception as e:
@@ -192,6 +192,7 @@ class ProductManager:
             )
             
             conn.commit()
+            self.logger.info(f"Product {code} deleted")
             return True
             
         except Exception as e:
@@ -203,7 +204,6 @@ class ProductManager:
         finally:
             if conn:
                 conn.close()
-                # Di akhir file, tambahkan:
 
 class ProductManagerCog(commands.Cog):
     def __init__(self, bot):
@@ -216,3 +216,4 @@ class ProductManagerCog(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(ProductManagerCog(bot))
+    logging.info("ProductManagerCog loaded")
