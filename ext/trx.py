@@ -6,6 +6,7 @@ import aiofiles
 import os
 from typing import List, Tuple, Optional
 from decimal import Decimal
+import sqlite3
 
 from database import get_connection
 from .constants import (
@@ -256,7 +257,7 @@ class TransactionCog(commands.Cog):
         try:
             messages = []
             current_msg = [
-                f"🛍️ Purchase Details:\n"
+                f"🛒 Purchase Details:\n"
                 f"Product: {product_name}\n"
                 f"Quantity: {quantity}\n"
                 f"Total Price: {price:,} WLs\n"
@@ -354,7 +355,7 @@ class TransactionCog(commands.Cog):
                 os.remove(file_path)
 
             return embed
-
+        
         except TransactionError as e:
             self.logger.warning(f"Error adding stock: {e}")
             raise
